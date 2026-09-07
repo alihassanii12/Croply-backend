@@ -173,3 +173,53 @@ class WeatherLiveView(APIView):
         data['advisory'] = _advisory(data)
 
         return Response(data)
+
+
+class WeatherTestView(APIView):
+    """
+    GET /api/weather/test/
+    Test endpoint to check if OpenWeather API key is working.
+    No authentication required for debugging.
+    """
+    permission_classes = []  # No authentication required
+
+    def get(self, request):
+        api_key = settings.OPENWEATHER_API_KEY
+        if not api_key:
+            return Response({
+                'error': 'OPENWEATHER_API_KEY not found in settings',
+                'configured': False
+            }, status=503)
+
+        # Test with Lahore as default city
+        location = request.query_params.get('location', 'Lahore')
+        location = _clean_location(location)
+
+        try:
+            resp = http_requests.get(
+                OWM_URL,
+                params={
+                    'q': location,
+                    'appid': api_key,
+                    'units': 'metric',
+                },
+                timeout=10,
+            )
+            
+            return Response({
+                'api_key_configured': True,
+                'api_key_preview': api_key[:8] + '...' if api_key else None,
+                'test_location': location,
+                'status_code': resp.status_code,
+                'success': resp.status_code == 200,
+                'response_preview': resp.json() if resp.status_code == 200 else resp.text[:200]
+            })
+            
+        except http_requests.RequestException as exc:
+            return Response({
+                'api_key_configured': True,
+                'api_key_preview': api_key[:8] + '...' if api_key else None,
+                'test_location': location,
+                'error': str(exc),
+                'success': False
+            })
