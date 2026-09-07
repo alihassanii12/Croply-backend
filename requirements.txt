@@ -5,8 +5,8 @@ django-cors-headers==4.3.1
 djangorestframework-simplejwt==5.4.0
 python-dotenv==1.0.0
 
-# Database
-psycopg2-binary==2.9.9
+# Database - Python 3.14 compatible
+psycopg[binary]==3.2.1
 dj-database-url==2.1.0
 
 # Authentication
