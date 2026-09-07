@@ -1,0 +1,155 @@
+from django.db.models import Q
+from rest_framework import status
+from rest_framework.permissions import IsAuthenticated
+from rest_framework.response import Response
+from rest_framework.views import APIView
+
+from marketplace.models import Listing
+from .models import ChatMessage
+from .serializers import ChatMessageSerializer
+
+
+class ChatMessageListView(APIView):
+    """
+    GET  /api/chat/?listing=<id>   — fetch all messages for this listing
+    POST /api/chat/?listing=<id>   — send a message
+
+    Buyer messages go to the listing's seller.
+    Seller messages go to the buyer (must pass ?buyer=<user_id> for seller).
+    Both parties see the full thread for this listing.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def _get_listing(self, listing_id):
+        try:
+            return Listing.objects.get(pk=listing_id, is_active=True)
+        except Listing.DoesNotExist:
+            return None
+
+    def get(self, request):
+        listing_id = request.query_params.get('listing')
+        if not listing_id:
+            return Response({'detail': 'listing param required.'}, status=400)
+
+        listing = self._get_listing(listing_id)
+        if not listing:
+            return Response({'detail': 'Listing not found.'}, status=404)
+
+        user = request.user
+        # Retrieve messages where user is either sender or recipient
+        messages = ChatMessage.objects.filter(
+            listing=listing
+        ).filter(
+            Q(sender=user) | Q(recipient=user)
+        ).select_related('sender', 'sender__profile')
+
+        # Mark incoming messages as read
+        messages.filter(recipient=user, is_read=False).update(is_read=True)
+
+        serializer = ChatMessageSerializer(
+            messages, many=True, context={'request': request}
+        )
+        return Response(serializer.data)
+
+    def post(self, request):
+        listing_id = request.query_params.get('listing')
+        if not listing_id:
+            return Response({'detail': 'listing param required.'}, status=400)
+
+        listing = self._get_listing(listing_id)
+        if not listing:
+            return Response({'detail': 'Listing not found.'}, status=404)
+
+        body = request.data.get('body', '').strip()
+        if not body:
+            return Response({'detail': 'Message body is required.'}, status=400)
+
+        user    = request.user
+        seller  = listing.seller
+
+        # Determine recipient
+        if user == seller:
+            # Seller replying to a buyer — buyer_id must be provided
+            buyer_id = request.data.get('recipient')
+            if not buyer_id:
+                return Response(
+                    {'detail': 'recipient (buyer id) required for seller reply.'},
+                    status=400,
+                )
+            from django.contrib.auth.models import User as DjangoUser
+            try:
+                recipient = DjangoUser.objects.get(pk=buyer_id)
+            except DjangoUser.DoesNotExist:
+                return Response({'detail': 'Recipient not found.'}, status=404)
+        else:
+            # Buyer messaging the seller
+            recipient = seller
+
+        msg = ChatMessage.objects.create(
+            listing=listing,
+            sender=user,
+            recipient=recipient,
+            body=body,
+        )
+
+        # Create in-app notification for recipient
+        from notifications.models import Notification
+        sender_name = user.get_full_name() or user.email
+        Notification.objects.create(
+            user=recipient,
+            title=f'New message from {sender_name}',
+            message=f'Re: {listing.title} — "{body[:80]}"',
+        )
+
+        return Response(
+            ChatMessageSerializer(msg, context={'request': request}).data,
+            status=status.HTTP_201_CREATED,
+        )
+
+
+class ChatThreadsView(APIView):
+    """
+    GET /api/chat/threads/
+    Returns a list of unique listing-threads the current user is part of.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        user = request.user
+        listing_ids = (
+            ChatMessage.objects.filter(
+                Q(sender=user) | Q(recipient=user)
+            )
+            .values_list('listing_id', flat=True)
+            .distinct()
+        )
+
+        threads = []
+        for lid in listing_ids:
+            listing = Listing.objects.filter(pk=lid).first()
+            if not listing:
+                continue
+            last_msg = (
+                ChatMessage.objects.filter(listing_id=lid)
+                .filter(Q(sender=user) | Q(recipient=user))
+                .last()
+            )
+            unread = ChatMessage.objects.filter(
+                listing_id=lid, recipient=user, is_read=False
+            ).count()
+            threads.append({
+                'listing_id':    listing.id,
+                'listing_title': listing.title,
+                'last_message':  last_msg.body if last_msg else '',
+                'last_at':       last_msg.created_at.isoformat() if last_msg else '',
+                'unread':        unread,
+                'other_user_name': (
+                    listing.seller.get_full_name() or listing.seller.email
+                    if user != listing.seller
+                    else (last_msg.sender.get_full_name() or last_msg.sender.email
+                          if last_msg and last_msg.sender != user else '')
+                ),
+            })
+
+        threads.sort(key=lambda t: t['last_at'], reverse=True)
+        return Response(threads)
