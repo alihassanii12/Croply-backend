@@ -6,7 +6,7 @@ djangorestframework-simplejwt==5.4.0
 python-dotenv==1.0.0
 
 # Database - Python 3.14 compatible
-psycopg[binary]==3.2.1
+psycopg[binary]==3.3.5
 dj-database-url==2.1.0
 
 # Authentication
